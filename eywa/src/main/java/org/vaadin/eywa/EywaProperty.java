@@ -1,9 +1,11 @@
 package org.vaadin.eywa;
 
 import java.lang.ref.WeakReference;
-import java.util.HashMap;
-import java.util.HashSet;
+import java.util.Collections;
 import java.util.LinkedList;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
 
 import com.vaadin.data.Property;
 import com.vaadin.server.ClientConnector;
@@ -14,62 +16,83 @@ public class EywaProperty<T> implements Property<T>,
 
     private String id;
     boolean readOnly;
-    static private HashMap<String, Shared> shared = new HashMap<String, Shared>();
+    final Shared<T> sharedInstance;
+    static private ConcurrentHashMap<String, Shared<?>> shared = new ConcurrentHashMap<String, Shared<?>>();
     LinkedList<ReadOnlyStatusChangeListener> readOnlyStatusListeners;
     LinkedList<ValueChangeListener> valueChangeListeners;
 
     private static class Shared<T> {
-        T value;
-        Class<T> type;
-        HashSet<WeakReference<EywaProperty<T>>> listeners = new HashSet<WeakReference<EywaProperty<T>>>();
+        final AtomicReference<T> value = new AtomicReference<T>();
+        final Class<T> type;
+        // ConcurrentHashSet<X> by wrapping ConcurrentHashMap<X, Boolean>
+        final Set<WeakReference<EywaProperty<T>>> listeners = Collections
+                .newSetFromMap(new ConcurrentHashMap<WeakReference<EywaProperty<T>>, Boolean>());
+
+        Shared(Class<T> type) {
+            this.type = type;
+        }
+
     }
 
     public EywaProperty(String globalId, Class<T> type) {
         this.id = globalId;
-        synchronized (shared) {
-            Shared<T> s = getShared(id);
-            if (s != null) {
-                if (s.type != type) {
-                    throw new IllegalArgumentException("Type of the '" + id
-                            + "' property is already set to be "
-                            + s.type.getName());
-                }
-            } else {
-                s = new Shared<T>();
-                s.type = type;
-                shared.put(id, s);
+
+        Shared<?> s = shared.get(globalId);
+        if (s == null) {
+            // Create instance if none found
+            Shared<T> newShared = new Shared<T>(type);
+
+            // Use existing value if it suddenly appeared...
+            s = shared.putIfAbsent(globalId, newShared);
+            if (s == null) {
+                // ...else keep using the newly created instance
+                s = newShared;
             }
         }
+
+        if (s.type != type) {
+            throw new IllegalArgumentException("Type of the '" + id
+                    + "' property is already set to be " + s.type.getName());
+        }
+
+        // Keep a reference to avoid doing lookups all the time
+        sharedInstance = (Shared<T>) s;
     }
 
     @Override
     public T getValue() {
-        synchronized (shared) {
-            return getShared(id).value;
-        }
+        return sharedInstance.value.get();
     }
 
     @Override
     public void setValue(T newValue) {
         LinkedList<EywaProperty<T>> propertiesToNotify = null;
-        synchronized (shared) {
-            T oldValue = getShared(id).value;
-            if (oldValue != newValue) {
-                Shared<T> shared = getShared(id);
-                shared.value = newValue;
-                notifyOwnListeners();
-                propertiesToNotify = new LinkedList<EywaProperty<T>>();
-                LinkedList<WeakReference<EywaProperty<T>>> deadListenerReferences = null;
-                for (WeakReference<EywaProperty<T>> r : shared.listeners) {
-                    EywaProperty<T> p = r.get();
-                    if (p == null) {
-                        if (deadListenerReferences == null) {
-                            deadListenerReferences = new LinkedList<WeakReference<EywaProperty<T>>>();
-                        }
-                        deadListenerReferences.add(r);
-                    } else if (p != this) {
-                        propertiesToNotify.add(p);
+
+        /*
+         * Using atomic access instead of synchronizing the entire block means
+         * that a listener might get added or removed between the instant when
+         * the value changes and when the listeners set is accessed. This should
+         * not change the semantics in any way as the actual events are fired
+         * asynchronously.
+         */
+        T oldValue = sharedInstance.value.getAndSet(newValue);
+        if (oldValue != newValue) {
+            notifyOwnListeners();
+            propertiesToNotify = new LinkedList<EywaProperty<T>>();
+            LinkedList<WeakReference<EywaProperty<T>>> deadListenerReferences = null;
+
+            // ConcurrentHashMap iteration uses a snapshot based on the state at
+            // "some point at or since the creation of the iterator"
+            for (WeakReference<EywaProperty<T>> r : sharedInstance.listeners) {
+                EywaProperty<T> p = r.get();
+                if (p == null) {
+                    if (deadListenerReferences == null) {
+                        deadListenerReferences = new LinkedList<WeakReference<EywaProperty<T>>>();
                     }
+                    // TODO dead references are never removed
+                    deadListenerReferences.add(r);
+                } else if (p != this) {
+                    propertiesToNotify.add(p);
                 }
             }
         }
@@ -96,6 +119,7 @@ public class EywaProperty<T> implements Property<T>,
     }
 
     private void notifyForeignListeners(UI currentUI) {
+        // TODO valueChangeListeners is accessed by other thread without locking
         if (valueChangeListeners != null) {
             final ValueChangeEvent event = new ValueChangeEvent() {
                 @Override
@@ -110,11 +134,14 @@ public class EywaProperty<T> implements Property<T>,
                             && listenerUI != null
                             && listenerUI.getSession() == currentUI
                                     .getSession()) {
+                        // TODO Can call listener with UI.getCurrent() pointing
+                        // to another UI in the same session
                         listener.valueChange(event);
                     } else {
                         EywaService.get().run(new Runnable() {
                             @Override
                             public void run() {
+                                // TODO listenerUI can be null
                                 listenerUI.access(new Runnable() {
                                     @Override
                                     public void run() {
@@ -138,15 +165,8 @@ public class EywaProperty<T> implements Property<T>,
 
     @Override
     public Class<? extends T> getType() {
-        synchronized (shared) {
-            return getShared(id).type;
-        }
-
-    }
-
-    /* This should only be called from inside synchronized block */
-    private Shared<T> getShared(String id) {
-        return shared.get(id);
+        // Can read final field without locking
+        return sharedInstance.type;
     }
 
     @Override
@@ -213,10 +233,8 @@ public class EywaProperty<T> implements Property<T>,
         if (listener != null) {
             if (valueChangeListeners == null) {
                 valueChangeListeners = new LinkedList<ValueChangeListener>();
-                synchronized (shared) {
-                    getShared(id).listeners
-                            .add(new WeakReference<EywaProperty<T>>(this));
-                }
+                sharedInstance.listeners
+                        .add(new WeakReference<EywaProperty<T>>(this));
             }
             if (!valueChangeListeners.contains(listener)) {
                 valueChangeListeners.add(listener);
@@ -236,6 +254,11 @@ public class EywaProperty<T> implements Property<T>,
             valueChangeListeners.remove(listener);
             if (valueChangeListeners.isEmpty()) {
                 valueChangeListeners = null;
+                /*
+                 * TODO could remove reference from sharedInstance.listeners,
+                 * although finding the right WeakReference requires iterating
+                 * or using a Map with a key unique for each instance
+                 */
             }
         }
     }
