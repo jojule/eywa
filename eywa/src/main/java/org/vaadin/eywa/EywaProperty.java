@@ -5,6 +5,8 @@ import java.util.Collections;
 import java.util.LinkedList;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicReference;
 
 import com.vaadin.data.Property;
@@ -18,6 +20,8 @@ public class EywaProperty<T> implements Property<T>,
     boolean readOnly;
     final Shared<T> sharedInstance;
     static private ConcurrentHashMap<String, Shared<?>> shared = new ConcurrentHashMap<String, Shared<?>>();
+    static private ExecutorService service = Executors
+            .newSingleThreadExecutor();
     LinkedList<ReadOnlyStatusChangeListener> readOnlyStatusListeners;
     LinkedList<ValueChangeListener> valueChangeListeners;
 
@@ -89,10 +93,15 @@ public class EywaProperty<T> implements Property<T>,
                     if (deadListenerReferences == null) {
                         deadListenerReferences = new LinkedList<WeakReference<EywaProperty<T>>>();
                     }
-                    // TODO dead references are never removed
                     deadListenerReferences.add(r);
                 } else if (p != this) {
                     propertiesToNotify.add(p);
+                }
+            }
+
+            if (deadListenerReferences != null) {
+                for (WeakReference<EywaProperty<T>> deadReference : deadListenerReferences) {
+                    sharedInstance.listeners.remove(deadReference);
                 }
             }
         }
@@ -138,7 +147,7 @@ public class EywaProperty<T> implements Property<T>,
                         // to another UI in the same session
                         listener.valueChange(event);
                     } else {
-                        EywaService.get().run(new Runnable() {
+                        service.execute(new Runnable() {
                             @Override
                             public void run() {
                                 // TODO listenerUI can be null
@@ -152,7 +161,7 @@ public class EywaProperty<T> implements Property<T>,
                         });
                     }
                 } else {
-                    EywaService.get().run(new Runnable() {
+                    service.execute(new Runnable() {
                         @Override
                         public void run() {
                             listener.valueChange(event);
@@ -255,9 +264,10 @@ public class EywaProperty<T> implements Property<T>,
             if (valueChangeListeners.isEmpty()) {
                 valueChangeListeners = null;
                 /*
-                 * TODO could remove reference from sharedInstance.listeners,
-                 * although finding the right WeakReference requires iterating
-                 * or using a Map with a key unique for each instance
+                 * Not removing reference from sharedInstance.listeners, because
+                 * finding the right WeakReference requires iterating or using a
+                 * Map with a key unique for each instance. It will be cleaned
+                 * out later on
                  */
             }
         }

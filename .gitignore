@@ -1,0 +1,8 @@
+target
+.settings
+.project
+.classpath
+.DS_Store
+
+eywa-demo/src/main/webapp/VAADIN/widgetsets
+rebel.xml

@@ -10,7 +10,7 @@
 
 	<properties>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-		<vaadin.version>7.1.0.beta1</vaadin.version>
+		<vaadin.version>7.1-SNAPSHOT</vaadin.version>
 		<vaadin.plugin.version>${vaadin.version}</vaadin.plugin.version>
 	</properties>
 
@@ -119,7 +119,6 @@
 						**/VAADIN/gwt-unitCache/**,
 						**/VAADIN/widgetsets/WEB-INF/**,
 						**/WEB-INF/lib/servlet-api-*.jar,
-						**/WEB-INF/lib/vaadin-client-*.jar,
 						**/WEB-INF/lib/jetty-*.jar,
 						**/WEB-INF/lib/ant-*.jar,
 						**/WEB-INF/classes/gwt-unitCache/**,
